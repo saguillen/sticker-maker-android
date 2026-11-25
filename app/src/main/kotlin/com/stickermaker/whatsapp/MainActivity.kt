@@ -4,25 +4,22 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.ui.Modifier
+import androidx.activity.viewModels
+import com.stickermaker.whatsapp.ui.StickerMakerApp
+import com.stickermaker.whatsapp.ui.StickerMakerViewModel
 import com.stickermaker.whatsapp.ui.theme.StickerMakerTheme
 
 class MainActivity : ComponentActivity() {
+  private val viewModel: StickerMakerViewModel by viewModels {
+    StickerMakerViewModel.factory(applicationContext)
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
     setContent {
       StickerMakerTheme {
-        Surface(
-          modifier = Modifier.fillMaxSize(),
-          color = MaterialTheme.colorScheme.background,
-        ) {
-          Text("Sticker Maker")
-        }
+        StickerMakerApp(viewModel = viewModel)
       }
     }
   }
