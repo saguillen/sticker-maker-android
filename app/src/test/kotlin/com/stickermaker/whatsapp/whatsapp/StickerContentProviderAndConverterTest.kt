@@ -12,7 +12,9 @@ import com.stickermaker.whatsapp.BuildConfig
 import com.stickermaker.whatsapp.data.AndroidStickerImageConverter
 import com.stickermaker.whatsapp.data.ConversionOutcome
 import com.stickermaker.whatsapp.data.FileStickerPackStore
+import com.stickermaker.whatsapp.data.TrayConversionOutcome
 import com.stickermaker.whatsapp.domain.PackId
+import com.stickermaker.whatsapp.domain.StickerFileName
 import com.stickermaker.whatsapp.domain.StickerPack
 import com.stickermaker.whatsapp.domain.WhatsAppContract
 import com.stickermaker.whatsapp.domain.WhatsAppLimits
@@ -165,6 +167,52 @@ class StickerContentProviderAndConverterTest {
     val traversalAssetUri = buildContentUri(authority, WhatsAppContract.PATH_STICKERS_ASSET, pack.id, "../pack.json")
     assertNull(provider.openAssetFile(unknownAssetUri, "r"))
     assertNull(provider.openAssetFile(traversalAssetUri, "r"))
+
+    val customTraySource = createColorfulNoisyBitmap(width = 300, height = 500)
+    val customTrayBytes = try {
+      (converter.convertTrayBitmap(customTraySource) as TrayConversionOutcome.Success).trayPngBytes
+    } finally {
+      customTraySource.recycle()
+    }
+
+    val afterTray = store.updateTrayIcon(PackId(pack.id), customTrayBytes)
+    val afterEmojis = store.updateStickerEmojis(
+      PackId(pack.id),
+      StickerFileName(firstStickerName),
+      listOf("🔥", "🎉"),
+    )
+
+    provider.query(singleMetadataUri, null, null, null, null).use { cursor ->
+      assertTrue(cursor.moveToFirst())
+      assertEquals(afterEmojis.imageDataVersion.toString(), cursor.getString(10))
+    }
+
+    provider.query(stickersUri, null, null, null, null).use { cursor ->
+      assertEquals(3, cursor.count)
+      assertTrue(cursor.moveToFirst())
+      assertEquals(firstStickerName, cursor.getString(0))
+      assertEquals("🔥,🎉", cursor.getString(1))
+    }
+
+    provider.openAssetFile(trayUri, "r").use { afd ->
+      assertNotNull(afd)
+      val readBytes = FileInputStream(afd!!.fileDescriptor).use { it.readBytes() }
+      assertArrayEquals(customTrayBytes, readBytes)
+    }
+
+    assertEquals(pack.imageDataVersion + 1, afterTray.imageDataVersion)
+
+    val promotedTray = converter.convertTrayFile(store.stickerFile(pack.id, firstStickerName))
+    val promotedBytes = (promotedTray as TrayConversionOutcome.Success).trayPngBytes
+    assertTrue(promotedBytes.size in 8..WhatsAppLimits.MAX_TRAY_ICON_BYTES)
+    val decodedPromoted = BitmapFactory.decodeByteArray(promotedBytes, 0, promotedBytes.size)
+    assertNotNull(decodedPromoted)
+    try {
+      assertEquals(WhatsAppLimits.TRAY_ICON_DIMENSION_PX, decodedPromoted.width)
+      assertEquals(WhatsAppLimits.TRAY_ICON_DIMENSION_PX, decodedPromoted.height)
+    } finally {
+      decodedPromoted.recycle()
+    }
   }
 
   @Test

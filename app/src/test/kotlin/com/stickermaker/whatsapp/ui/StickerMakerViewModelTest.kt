@@ -5,11 +5,13 @@ import com.stickermaker.whatsapp.data.ConversionError
 import com.stickermaker.whatsapp.data.ConversionOutcome
 import com.stickermaker.whatsapp.data.ConvertedSticker
 import com.stickermaker.whatsapp.data.FileStickerPackStore
+import com.stickermaker.whatsapp.data.TrayConversionOutcome
 import com.stickermaker.whatsapp.domain.PackId
 import com.stickermaker.whatsapp.domain.PackReadiness
 import com.stickermaker.whatsapp.domain.PackValidationIssue
 import com.stickermaker.whatsapp.domain.WhatsAppLimits
 import com.stickermaker.whatsapp.whatsapp.ExportResult
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -18,6 +20,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -331,17 +334,125 @@ class StickerMakerViewModelTest {
     assertTrue("Expected skipped count in status: $status", status.contains("2"))
   }
 
+  @Test
+  fun setCustomTrayIconAndSetStickerAsTrayIconUpdateTrayNotifyProviderAndHandleFailure() = runTest(testDispatcher) {
+    val store = FileStickerPackStore(tempFolder.root)
+    var notifyCount = 0
+    val customTrayBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 7, 7, 7, 7)
+    val stickerTrayBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 5, 5, 5, 5)
+    val badUri = Uri.parse("content://media/bad-tray")
+    val goodUri = Uri.parse("content://media/good-tray")
+    var promotedFile: File? = null
+
+    val viewModel = createViewModel(
+      store = store,
+      convertImage = { validOutcome() },
+      convertTrayImage = { uri ->
+        if (uri == goodUri) {
+          TrayConversionOutcome.Success(customTrayBytes)
+        } else {
+          TrayConversionOutcome.Failure(ConversionError.UnreadableSource)
+        }
+      },
+      convertTrayFile = { file ->
+        promotedFile = file
+        TrayConversionOutcome.Success(stickerTrayBytes)
+      },
+      onPacksChanged = { notifyCount++ },
+    )
+    advanceUntilIdle()
+
+    viewModel.createPack("Tray Pack", "Tester")
+    advanceUntilIdle()
+    viewModel.importImages(listOf(Uri.parse("content://media/s1")))
+    advanceUntilIdle()
+
+    val editorBefore = viewModel.uiState.value.activeEditor!!
+    val versionBefore = editorBefore.pack.imageDataVersion
+    val notifyBefore = notifyCount
+
+    viewModel.setCustomTrayIcon(badUri)
+    advanceUntilIdle()
+    assertEquals(notifyBefore, notifyCount)
+    assertEquals(versionBefore, viewModel.uiState.value.activeEditor!!.pack.imageDataVersion)
+    assertNotNull(viewModel.uiState.value.statusMessage)
+
+    viewModel.setCustomTrayIcon(goodUri)
+    advanceUntilIdle()
+    val editorAfterCustom = viewModel.uiState.value.activeEditor!!
+    assertEquals(notifyBefore + 1, notifyCount)
+    assertEquals(versionBefore + 1, editorAfterCustom.pack.imageDataVersion)
+    assertEquals("Tray icon updated", viewModel.uiState.value.statusMessage)
+    assertArrayEquals(customTrayBytes, editorAfterCustom.trayFile!!.readBytes())
+
+    val firstSticker = editorAfterCustom.pack.stickers.first().fileName
+    viewModel.setStickerAsTrayIcon(editorAfterCustom.pack.id, firstSticker)
+    advanceUntilIdle()
+    val editorAfterPromote = viewModel.uiState.value.activeEditor!!
+    assertEquals(store.stickerFile(editorAfterCustom.pack.id, firstSticker), promotedFile)
+    assertEquals(notifyBefore + 2, notifyCount)
+    assertEquals(versionBefore + 2, editorAfterPromote.pack.imageDataVersion)
+    assertEquals("Tray icon updated", viewModel.uiState.value.statusMessage)
+    assertArrayEquals(stickerTrayBytes, editorAfterPromote.trayFile!!.readBytes())
+  }
+
+  @Test
+  fun updateStickerEmojisValidatesInputPersistsValidEmojisAndNotifiesProvider() = runTest(testDispatcher) {
+    val store = FileStickerPackStore(tempFolder.root)
+    var notifyCount = 0
+    val viewModel = createViewModel(
+      store = store,
+      convertImage = { validOutcome() },
+      onPacksChanged = { notifyCount++ },
+    )
+    advanceUntilIdle()
+
+    viewModel.createPack("Emoji Pack", "Tester")
+    advanceUntilIdle()
+    viewModel.importImages(listOf(Uri.parse("content://media/s1")))
+    advanceUntilIdle()
+
+    val editor = viewModel.uiState.value.activeEditor!!
+    val packId = editor.pack.id
+    val stickerName = editor.pack.stickers.first().fileName
+    val versionBefore = editor.pack.imageDataVersion
+    val notifyBefore = notifyCount
+
+    viewModel.updateStickerEmojis(packId, stickerName, "not emojis")
+    advanceUntilIdle()
+    assertEquals(notifyBefore, notifyCount)
+    assertEquals(versionBefore, viewModel.uiState.value.activeEditor!!.pack.imageDataVersion)
+    assertEquals(WhatsAppLimits.DEFAULT_STICKER_EMOJIS, viewModel.uiState.value.activeEditor!!.pack.stickers.first().emojis)
+    assertNotNull(viewModel.uiState.value.statusMessage)
+
+    viewModel.updateStickerEmojis(packId, stickerName, "🔥🎉❤️")
+    advanceUntilIdle()
+    val updatedEditor = viewModel.uiState.value.activeEditor!!
+    assertEquals(notifyBefore + 1, notifyCount)
+    assertEquals(versionBefore + 1, updatedEditor.pack.imageDataVersion)
+    assertEquals(listOf("🔥", "🎉", "❤️"), updatedEditor.pack.stickers.first().emojis)
+    assertEquals("Sticker emojis updated", viewModel.uiState.value.statusMessage)
+  }
+
   private fun createViewModel(
     store: FileStickerPackStore,
     convertImage: suspend (Uri) -> ConversionOutcome = { validOutcome() },
+    convertTrayImage: suspend (Uri) -> TrayConversionOutcome = { validTrayOutcome() },
+    convertTrayFile: suspend (File) -> TrayConversionOutcome = { validTrayOutcome() },
     onPacksChanged: () -> Unit = {},
     checkWhitelisted: (String) -> Boolean = { false },
   ): StickerMakerViewModel = StickerMakerViewModel(
     store = store,
     convertImage = convertImage,
+    convertTrayImage = convertTrayImage,
+    convertTrayFile = convertTrayFile,
     onPacksChanged = onPacksChanged,
     checkWhitelisted = checkWhitelisted,
     ioDispatcher = testDispatcher,
+  )
+
+  private fun validTrayOutcome(): TrayConversionOutcome.Success = TrayConversionOutcome.Success(
+    byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A),
   )
 
   private fun validOutcome(): ConversionOutcome.Success = ConversionOutcome.Success(
