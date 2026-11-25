@@ -339,17 +339,17 @@ class StickerMakerViewModel(
       val store = FileStickerPackStore.forContext(appContext)
       val converter = AndroidStickerImageConverter(appContext.contentResolver)
       return object : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
           require(modelClass.isAssignableFrom(StickerMakerViewModel::class.java)) {
             "Unknown ViewModel class: ${modelClass.name}"
           }
-          return StickerMakerViewModel(
+          val instance = StickerMakerViewModel(
             store = store,
             convertImage = { uri -> converter.convert(uri) },
             onPacksChanged = { StickerContentProvider.notifyPacksChanged(appContext) },
             checkWhitelisted = { id -> WhatsAppPackExporter.isPackWhitelisted(appContext, id) },
-          ) as T
+          )
+          return requireNotNull(modelClass.cast(instance))
         }
       }
     }
