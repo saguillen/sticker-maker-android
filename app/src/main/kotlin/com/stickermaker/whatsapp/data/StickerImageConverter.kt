@@ -15,6 +15,7 @@ import com.stickermaker.whatsapp.domain.WhatsAppLimits
 import com.stickermaker.whatsapp.domain.computeFitInsideRect
 import com.stickermaker.whatsapp.domain.encodeWithinBudget
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.IOException
 
 data class ConvertedSticker(
@@ -41,27 +42,70 @@ sealed interface ConversionOutcome {
   data class Failure(val error: ConversionError) : ConversionOutcome
 }
 
+sealed interface TrayConversionOutcome {
+  data class Success(val trayPngBytes: ByteArray) : TrayConversionOutcome {
+    override fun equals(other: Any?): Boolean {
+      if (this === other) return true
+      if (other !is Success) return false
+      return trayPngBytes.contentEquals(other.trayPngBytes)
+    }
+
+    override fun hashCode(): Int = trayPngBytes.contentHashCode()
+  }
+
+  data class Failure(val error: ConversionError) : TrayConversionOutcome
+}
+
 class AndroidStickerImageConverter(
   private val contentResolver: ContentResolver,
 ) {
   fun convert(uri: Uri): ConversionOutcome {
-    val bounds = decodeBounds(uri) ?: return ConversionOutcome.Failure(ConversionError.UnreadableSource)
-    val (srcWidth, srcHeight) = bounds
-    val orientation = readExifOrientation(uri)
-    val sampleSize = computeInSampleSize(srcWidth, srcHeight)
-
-    val decoded = decodeSampledBitmap(uri, sampleSize)
+    val oriented = decodeOrientedBitmap(uri)
       ?: return ConversionOutcome.Failure(ConversionError.UnreadableSource)
-
-    val oriented = applyExifOrientation(decoded, orientation)
-    if (oriented !== decoded) {
-      decoded.recycle()
-    }
-
     return try {
       convertBitmap(oriented)
     } finally {
       oriented.recycle()
+    }
+  }
+
+  fun convertTrayImage(uri: Uri): TrayConversionOutcome {
+    val oriented = decodeOrientedBitmap(uri)
+      ?: return TrayConversionOutcome.Failure(ConversionError.UnreadableSource)
+    return try {
+      convertTrayBitmap(oriented)
+    } finally {
+      oriented.recycle()
+    }
+  }
+
+  fun convertTrayFile(file: File): TrayConversionOutcome {
+    if (!file.isFile) {
+      return TrayConversionOutcome.Failure(ConversionError.UnreadableSource)
+    }
+    val decoded = BitmapFactory.decodeFile(file.absolutePath)
+      ?: return TrayConversionOutcome.Failure(ConversionError.UnreadableSource)
+    return try {
+      convertTrayBitmap(decoded)
+    } finally {
+      decoded.recycle()
+    }
+  }
+
+  fun convertTrayBitmap(source: Bitmap): TrayConversionOutcome {
+    if (source.width <= 0 || source.height <= 0 || source.isRecycled) {
+      return TrayConversionOutcome.Failure(ConversionError.UnreadableSource)
+    }
+    val trayBytes = encodeTrayPng(source)
+    return when {
+      trayBytes.size < MIN_PNG_BYTES -> TrayConversionOutcome.Failure(ConversionError.UnreadableSource)
+      trayBytes.size > WhatsAppLimits.MAX_TRAY_ICON_BYTES -> TrayConversionOutcome.Failure(
+        ConversionError.ExceedsMaxSize(
+          smallestBytes = trayBytes.size,
+          maxBytes = WhatsAppLimits.MAX_TRAY_ICON_BYTES,
+        ),
+      )
+      else -> TrayConversionOutcome.Success(trayBytes)
     }
   }
 
@@ -84,19 +128,33 @@ class AndroidStickerImageConverter(
             maxBytes = encodeResult.maxBytes,
           ),
         )
-        is EncodeResult.Success -> {
-          val trayBytes = encodeTrayPng(source)
-          ConversionOutcome.Success(
+        is EncodeResult.Success -> when (val trayOutcome = convertTrayBitmap(source)) {
+          is TrayConversionOutcome.Success -> ConversionOutcome.Success(
             ConvertedSticker(
               webpBytes = encodeResult.bytes,
-              trayPngBytes = trayBytes,
+              trayPngBytes = trayOutcome.trayPngBytes,
             ),
           )
+          is TrayConversionOutcome.Failure -> ConversionOutcome.Failure(trayOutcome.error)
         }
       }
     } finally {
       stickerBitmap.recycle()
     }
+  }
+
+  internal fun decodeOrientedBitmap(uri: Uri): Bitmap? {
+    val bounds = decodeBounds(uri) ?: return null
+    val (srcWidth, srcHeight) = bounds
+    val orientation = readExifOrientation(uri)
+    val sampleSize = computeInSampleSize(srcWidth, srcHeight)
+
+    val decoded = decodeSampledBitmap(uri, sampleSize) ?: return null
+    val oriented = applyExifOrientation(decoded, orientation)
+    if (oriented !== decoded) {
+      decoded.recycle()
+    }
+    return oriented
   }
 
   private fun decodeBounds(uri: Uri): Pair<Int, Int>? {
@@ -222,6 +280,7 @@ class AndroidStickerImageConverter(
   }
 
   private companion object {
+    const val MIN_PNG_BYTES = 8
     const val TARGET_DECODE_MIN_EDGE = 512
     const val TARGET_DECODE_MAX_EDGE = 1024
     val TRAY_DIMENSION_CANDIDATES = intArrayOf(WhatsAppLimits.TRAY_ICON_DIMENSION_PX, 72, 48)

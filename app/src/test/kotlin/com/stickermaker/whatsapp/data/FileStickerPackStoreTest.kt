@@ -101,4 +101,36 @@ class FileStickerPackStoreTest {
     assertEquals(1, listed.size)
     assertEquals(valid.id, listed.single().id)
   }
+
+  @Test
+  fun updateTrayIconAndUpdateStickerEmojisPersistChangesAndIncrementVersion() {
+    val store = FileStickerPackStore(tempFolder.root)
+    val created = store.createPack("Custom", "Maker")
+    val packId = PackId(created.id)
+
+    val initialTray = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 1, 2, 3, 4)
+    val stickerBytes = "RIFF0000WEBP1111".toByteArray()
+    val afterAdd = store.addStickers(
+      packId,
+      listOf(ConvertedSticker(webpBytes = stickerBytes, trayPngBytes = initialTray)),
+    )
+    val stickerFileName = StickerFileName(afterAdd.stickers.single().fileName)
+
+    val customTray = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 9, 8, 7, 6, 5)
+    val afterTray = store.updateTrayIcon(packId, customTray)
+    assertEquals(afterAdd.imageDataVersion + 1, afterTray.imageDataVersion)
+    val resolvedTray = store.resolveAssetFile(created.id, afterTray.trayImageFile)
+    assertNotNull(resolvedTray)
+    assertArrayEquals(customTray, resolvedTray!!.file.readBytes())
+
+    val newEmojis = listOf("🔥", "🎉")
+    val afterEmojis = store.updateStickerEmojis(packId, stickerFileName, newEmojis)
+    assertEquals(afterTray.imageDataVersion + 1, afterEmojis.imageDataVersion)
+    assertEquals(newEmojis, afterEmojis.stickers.single().emojis)
+
+    val reloaded = store.getPack(packId)
+    assertNotNull(reloaded)
+    assertEquals(afterEmojis.imageDataVersion, reloaded!!.imageDataVersion)
+    assertEquals(newEmojis, reloaded.stickers.single().emojis)
+  }
 }

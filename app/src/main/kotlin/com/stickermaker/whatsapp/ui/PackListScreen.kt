@@ -178,6 +178,7 @@ private fun PackRowCard(
       LocalImageThumbnail(
         file = summary.trayFile,
         contentDescription = "${summary.pack.name} tray icon",
+        cacheKey = summary.pack.imageDataVersion,
         modifier = Modifier
           .size(56.dp)
           .clip(RoundedCornerShape(12.dp)),

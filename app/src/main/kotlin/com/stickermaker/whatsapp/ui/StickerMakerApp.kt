@@ -40,6 +40,14 @@ fun StickerMakerApp(viewModel: StickerMakerViewModel) {
     }
   }
 
+  val trayIconPicker = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.PickVisualMedia(),
+  ) { uri ->
+    if (uri != null) {
+      viewModel.setCustomTrayIcon(uri)
+    }
+  }
+
   val whatsAppExportLauncher = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.StartActivityForResult(),
   ) { result ->
@@ -93,6 +101,19 @@ fun StickerMakerApp(viewModel: StickerMakerViewModel) {
       },
       onRemoveSticker = { fileName ->
         viewModel.removeSticker(editor.pack.id, fileName)
+      },
+      onChangeTrayIconClick = {
+        trayIconPicker.launch(
+          PickVisualMediaRequest(
+            mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly,
+          ),
+        )
+      },
+      onUpdateStickerEmojis = { fileName, rawEmojis ->
+        viewModel.updateStickerEmojis(editor.pack.id, fileName, rawEmojis)
+      },
+      onSetStickerAsTrayIcon = { fileName ->
+        viewModel.setStickerAsTrayIcon(editor.pack.id, fileName)
       },
     )
   } else {

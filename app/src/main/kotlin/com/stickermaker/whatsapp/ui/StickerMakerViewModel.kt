@@ -10,12 +10,16 @@ import com.stickermaker.whatsapp.data.ConversionError
 import com.stickermaker.whatsapp.data.ConversionOutcome
 import com.stickermaker.whatsapp.data.ConvertedSticker
 import com.stickermaker.whatsapp.data.FileStickerPackStore
+import com.stickermaker.whatsapp.data.TrayConversionOutcome
+import com.stickermaker.whatsapp.domain.EmojiParseResult
+import com.stickermaker.whatsapp.domain.EmojiValidationError
 import com.stickermaker.whatsapp.domain.PackId
 import com.stickermaker.whatsapp.domain.PackReadiness
 import com.stickermaker.whatsapp.domain.StickerFileName
 import com.stickermaker.whatsapp.domain.StickerPack
 import com.stickermaker.whatsapp.domain.WhatsAppLimits
 import com.stickermaker.whatsapp.domain.evaluatePackReadiness
+import com.stickermaker.whatsapp.domain.parseStickerEmojis
 import com.stickermaker.whatsapp.whatsapp.ExportResult
 import com.stickermaker.whatsapp.whatsapp.StickerContentProvider
 import com.stickermaker.whatsapp.whatsapp.WhatsAppPackExporter
@@ -61,6 +65,8 @@ data class UiState(
 class StickerMakerViewModel(
   private val store: FileStickerPackStore,
   private val convertImage: suspend (Uri) -> ConversionOutcome,
+  private val convertTrayImage: suspend (Uri) -> TrayConversionOutcome,
+  private val convertTrayFile: suspend (File) -> TrayConversionOutcome,
   private val onPacksChanged: () -> Unit,
   private val checkWhitelisted: (String) -> Boolean,
   private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -230,6 +236,73 @@ class StickerMakerViewModel(
     }
   }
 
+  fun setCustomTrayIcon(uri: Uri) {
+    val editor = _uiState.value.activeEditor ?: return
+    if (editor.isImporting) return
+    val validPackId = PackId.parseOrNull(editor.pack.id) ?: return
+
+    viewModelScope.launch {
+      val message = try {
+        withContext(ioDispatcher) {
+          applyTrayConversion(validPackId, convertTrayImage(uri))
+        }
+      } catch (_: NoSuchElementException) {
+        "Sticker pack no longer exists"
+      }
+      val snapshot = loadSnapshot(targetScreen = _uiState.value.screen)
+      applySnapshot(snapshot, statusMessage = message)
+    }
+  }
+
+  fun setStickerAsTrayIcon(packId: String, fileName: String) {
+    val validPackId = PackId.parseOrNull(packId) ?: return
+    val validFileName = StickerFileName.parseOrNull(fileName) ?: return
+
+    viewModelScope.launch {
+      val message = try {
+        withContext(ioDispatcher) {
+          val file = store.stickerFile(validPackId.value, validFileName.value)
+          applyTrayConversion(validPackId, convertTrayFile(file))
+        }
+      } catch (_: NoSuchElementException) {
+        "Sticker pack no longer exists"
+      }
+      val snapshot = loadSnapshot(targetScreen = _uiState.value.screen)
+      applySnapshot(snapshot, statusMessage = message)
+    }
+  }
+
+  fun updateStickerEmojis(packId: String, fileName: String, rawEmojis: String) {
+    val validPackId = PackId.parseOrNull(packId) ?: return
+    val validFileName = StickerFileName.parseOrNull(fileName) ?: return
+
+    val parsed = parseStickerEmojis(rawEmojis)
+    if (parsed is EmojiParseResult.Invalid) {
+      val message = when (val error = parsed.error) {
+        EmojiValidationError.Empty -> "Enter at least ${WhatsAppLimits.MIN_EMOJIS} emoji"
+        is EmojiValidationError.TooMany -> "Use at most ${error.max} emojis"
+        EmojiValidationError.NonEmojiInput -> "Enter emojis only (1–${WhatsAppLimits.MAX_EMOJIS})"
+      }
+      _uiState.update { it.copy(statusMessage = message) }
+      return
+    }
+
+    val validEmojis = (parsed as EmojiParseResult.Valid).emojis
+    viewModelScope.launch {
+      val message = try {
+        withContext(ioDispatcher) {
+          store.updateStickerEmojis(validPackId, validFileName, validEmojis)
+          onPacksChanged()
+          "Sticker emojis updated"
+        }
+      } catch (_: NoSuchElementException) {
+        "Sticker no longer exists"
+      }
+      val snapshot = loadSnapshot(targetScreen = _uiState.value.screen)
+      applySnapshot(snapshot, statusMessage = message)
+    }
+  }
+
   fun onWhatsAppExportResult(result: ExportResult) {
     val message = when (result) {
       ExportResult.Added -> "Sticker pack added to WhatsApp"
@@ -254,12 +327,26 @@ class StickerMakerViewModel(
     _uiState.update { it.copy(statusMessage = null) }
   }
 
-  private fun applySnapshot(snapshot: Snapshot) {
+  private fun applyTrayConversion(packId: PackId, outcome: TrayConversionOutcome): String =
+    when (outcome) {
+      is TrayConversionOutcome.Success -> {
+        store.updateTrayIcon(packId, outcome.trayPngBytes)
+        onPacksChanged()
+        "Tray icon updated"
+      }
+      is TrayConversionOutcome.Failure -> when (outcome.error) {
+        is ConversionError.ExceedsMaxSize -> "Tray icon exceeds 50 KB"
+        ConversionError.UnreadableSource -> "Could not read selected image"
+      }
+    }
+
+  private fun applySnapshot(snapshot: Snapshot, statusMessage: String? = null) {
     _uiState.update { state ->
       state.copy(
         screen = snapshot.screen,
         packs = snapshot.packs,
         activeEditor = snapshot.activeEditor,
+        statusMessage = statusMessage ?: state.statusMessage,
       )
     }
   }
@@ -346,6 +433,8 @@ class StickerMakerViewModel(
           val instance = StickerMakerViewModel(
             store = store,
             convertImage = { uri -> converter.convert(uri) },
+            convertTrayImage = { uri -> converter.convertTrayImage(uri) },
+            convertTrayFile = { file -> converter.convertTrayFile(file) },
             onPacksChanged = { StickerContentProvider.notifyPacksChanged(appContext) },
             checkWhitelisted = { id -> WhatsAppPackExporter.isPackWhitelisted(appContext, id) },
           )

@@ -90,6 +90,59 @@ class DomainBehaviorTest {
       listOf(PackValidationIssue.NameTooLong, PackValidationIssue.PublisherTooLong),
       longResult.issues,
     )
+
+    val invalidEmojiStickers = listOf(
+      StickerItem(fileName = "empty.webp", emojis = emptyList(), sizeBytes = 10_000L),
+      StickerItem(fileName = "too_many.webp", emojis = listOf("🙂", "😂", "🔥", "🎉"), sizeBytes = 10_000L),
+      validStickers[2],
+    )
+    val invalidEmojiResult = evaluatePackReadiness(
+      validPack.copy(stickers = invalidEmojiStickers),
+      trayExists = true,
+    ) as PackReadiness.NotReady
+    assertEquals(
+      listOf(
+        PackValidationIssue.InvalidStickerEmojis("empty.webp", 0),
+        PackValidationIssue.InvalidStickerEmojis("too_many.webp", 4),
+      ),
+      invalidEmojiResult.issues,
+    )
+  }
+
+  @Test
+  fun parseStickerEmojisHandlesSingleMultiConcatenatedGraphemesAndRejectsInvalidInputs() {
+    assertEquals(EmojiParseResult.Valid(listOf("🙂")), parseStickerEmojis("🙂"))
+    assertEquals(EmojiParseResult.Valid(listOf("🔥", "🎉")), parseStickerEmojis("🔥 🎉"))
+    assertEquals(EmojiParseResult.Valid(listOf("🔥", "🎉", "😂")), parseStickerEmojis("🔥, 🎉 ,😂"))
+    assertEquals(EmojiParseResult.Valid(listOf("🔥", "🎉")), parseStickerEmojis("🔥🎉"))
+    assertEquals(EmojiParseResult.Valid(listOf("❤️")), parseStickerEmojis("❤️"))
+    assertEquals(EmojiParseResult.Valid(listOf("👍🏽")), parseStickerEmojis("👍🏽"))
+    assertEquals(EmojiParseResult.Valid(listOf("❤️", "👍🏽", "🔥")), parseStickerEmojis("❤️👍🏽🔥"))
+
+    assertEquals(
+      EmojiParseResult.Invalid(EmojiValidationError.Empty),
+      parseStickerEmojis(""),
+    )
+    assertEquals(
+      EmojiParseResult.Invalid(EmojiValidationError.Empty),
+      parseStickerEmojis("   ,  "),
+    )
+    assertEquals(
+      EmojiParseResult.Invalid(EmojiValidationError.TooMany(count = 4, max = WhatsAppLimits.MAX_EMOJIS)),
+      parseStickerEmojis("🙂😂🔥🎉"),
+    )
+    assertEquals(
+      EmojiParseResult.Invalid(EmojiValidationError.NonEmojiInput),
+      parseStickerEmojis("abc"),
+    )
+    assertEquals(
+      EmojiParseResult.Invalid(EmojiValidationError.NonEmojiInput),
+      parseStickerEmojis("123"),
+    )
+    assertEquals(
+      EmojiParseResult.Invalid(EmojiValidationError.NonEmojiInput),
+      parseStickerEmojis("🔥a"),
+    )
   }
 
   @Test

@@ -1,5 +1,7 @@
 package com.stickermaker.whatsapp.domain
 
+import java.text.BreakIterator
+import java.util.Locale
 import java.util.UUID
 import kotlinx.serialization.Serializable
 
@@ -85,11 +87,131 @@ sealed interface PackValidationIssue {
   data class TooFewStickers(val current: Int, val required: Int) : PackValidationIssue
   data class TooManyStickers(val current: Int, val max: Int) : PackValidationIssue
   data class StickerExceedsMaxSize(val fileName: String, val sizeBytes: Long) : PackValidationIssue
+  data class InvalidStickerEmojis(val fileName: String, val count: Int) : PackValidationIssue
 }
 
 sealed interface PackReadiness {
   data object Ready : PackReadiness
   data class NotReady(val issues: List<PackValidationIssue>) : PackReadiness
+}
+
+sealed interface EmojiValidationError {
+  data object Empty : EmojiValidationError
+  data class TooMany(val count: Int, val max: Int) : EmojiValidationError
+  data object NonEmojiInput : EmojiValidationError
+}
+
+sealed interface EmojiParseResult {
+  data class Valid(val emojis: List<String>) : EmojiParseResult
+  data class Invalid(val error: EmojiValidationError) : EmojiParseResult
+}
+
+private val EMOJI_SPLIT_REGEX = Regex("[\\s,]+")
+private const val ZERO_WIDTH_JOINER = 0x200D
+private const val VARIATION_SELECTOR_TEXT = 0xFE0E
+private const val VARIATION_SELECTOR_EMOJI = 0xFE0F
+private const val KEYCAP_COMBINING_MARK = 0x20E3
+
+fun parseStickerEmojis(raw: String): EmojiParseResult {
+  val chunks = raw.split(EMOJI_SPLIT_REGEX).filter { it.isNotEmpty() }
+  if (chunks.isEmpty()) {
+    return EmojiParseResult.Invalid(EmojiValidationError.Empty)
+  }
+
+  val clusters = mutableListOf<String>()
+  for (chunk in chunks) {
+    clusters += segmentGraphemeClusters(chunk)
+  }
+
+  if (clusters.isEmpty()) {
+    return EmojiParseResult.Invalid(EmojiValidationError.Empty)
+  }
+
+  if (clusters.any { !isEmojiCluster(it) }) {
+    return EmojiParseResult.Invalid(EmojiValidationError.NonEmojiInput)
+  }
+
+  if (clusters.size > WhatsAppLimits.MAX_EMOJIS) {
+    return EmojiParseResult.Invalid(
+      EmojiValidationError.TooMany(count = clusters.size, max = WhatsAppLimits.MAX_EMOJIS),
+    )
+  }
+
+  return EmojiParseResult.Valid(clusters)
+}
+
+private fun segmentGraphemeClusters(chunk: String): List<String> {
+  val iterator = BreakIterator.getCharacterInstance(Locale.ROOT)
+  iterator.setText(chunk)
+
+  val rawSegments = mutableListOf<String>()
+  var start = iterator.first()
+  var end = iterator.next()
+  while (end != BreakIterator.DONE) {
+    rawSegments += chunk.substring(start, end)
+    start = end
+    end = iterator.next()
+  }
+
+  val merged = mutableListOf<String>()
+  for (segment in rawSegments) {
+    if (merged.isNotEmpty() && shouldMergeWithPrevious(merged.last(), segment)) {
+      merged[merged.lastIndex] = merged.last() + segment
+    } else {
+      merged += segment
+    }
+  }
+  return merged
+}
+
+private fun shouldMergeWithPrevious(previous: String, current: String): Boolean {
+  val prevLastCp = previous.codePointBefore(previous.length)
+  val currFirstCp = current.codePointAt(0)
+  if (prevLastCp == ZERO_WIDTH_JOINER) return true
+  if (currFirstCp == ZERO_WIDTH_JOINER) return true
+  if (currFirstCp == VARIATION_SELECTOR_TEXT || currFirstCp == VARIATION_SELECTOR_EMOJI) return true
+  if (currFirstCp == KEYCAP_COMBINING_MARK) return true
+  if (currFirstCp in 0x1F3FB..0x1F3FF) return true
+  if (currFirstCp in 0xE0020..0xE007F) return true
+  if (isSingleRegionalIndicator(previous) && isSingleRegionalIndicator(current)) return true
+  return false
+}
+
+private fun isSingleRegionalIndicator(segment: String): Boolean =
+  segment.codePointCount(0, segment.length) == 1 && segment.codePointAt(0) in 0x1F1E6..0x1F1FF
+
+private fun isEmojiCluster(cluster: String): Boolean {
+  val codePoints = cluster.codePoints().toArray()
+  if (codePoints.isEmpty()) return false
+  if (codePoints.contains(KEYCAP_COMBINING_MARK)) {
+    val base = codePoints[0]
+    return base in '0'.code..'9'.code || base == '#'.code || base == '*'.code
+  }
+  return codePoints.any(::isEmojiCodePoint)
+}
+
+private fun isEmojiCodePoint(cp: Int): Boolean = when (cp) {
+  in 0x1F000..0x1FAFF,
+  in 0x2600..0x27BF,
+  in 0x2300..0x23FF,
+  in 0x2B00..0x2BFF,
+  in 0x2194..0x21AA,
+  in 0x25AA..0x25FE,
+  0x00A9,
+  0x00AE,
+  0x203C,
+  0x2049,
+  0x2122,
+  0x2139,
+  0x24C2,
+  0x2934,
+  0x2935,
+  0x3030,
+  0x303D,
+  0x3297,
+  0x3299,
+  -> true
+  else -> false
 }
 
 fun evaluatePackReadiness(pack: StickerPack, trayExists: Boolean): PackReadiness {
@@ -128,6 +250,12 @@ fun evaluatePackReadiness(pack: StickerPack, trayExists: Boolean): PackReadiness
       issues += PackValidationIssue.StickerExceedsMaxSize(
         fileName = sticker.fileName,
         sizeBytes = sticker.sizeBytes,
+      )
+    }
+    if (sticker.emojis.size !in WhatsAppLimits.MIN_EMOJIS..WhatsAppLimits.MAX_EMOJIS) {
+      issues += PackValidationIssue.InvalidStickerEmojis(
+        fileName = sticker.fileName,
+        count = sticker.emojis.size,
       )
     }
   }

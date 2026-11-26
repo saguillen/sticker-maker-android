@@ -1,5 +1,6 @@
 package com.stickermaker.whatsapp.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,32 +21,45 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.stickermaker.whatsapp.domain.EmojiParseResult
+import com.stickermaker.whatsapp.domain.EmojiValidationError
 import com.stickermaker.whatsapp.domain.PackReadiness
 import com.stickermaker.whatsapp.domain.PackValidationIssue
 import com.stickermaker.whatsapp.domain.StickerItem
 import com.stickermaker.whatsapp.domain.StickerPack
 import com.stickermaker.whatsapp.domain.WhatsAppLimits
+import com.stickermaker.whatsapp.domain.parseStickerEmojis
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -57,9 +71,16 @@ fun PackEditorScreen(
   onImportClick: (remainingSlots: Int) -> Unit,
   onAddToWhatsAppClick: (StickerPack) -> Unit,
   onRemoveSticker: (fileName: String) -> Unit,
+  onChangeTrayIconClick: () -> Unit,
+  onUpdateStickerEmojis: (fileName: String, rawEmojis: String) -> Unit,
+  onSetStickerAsTrayIcon: (fileName: String) -> Unit,
 ) {
   val remainingSlots = (WhatsAppLimits.MAX_STICKERS_PER_PACK - editor.pack.stickers.size)
     .coerceAtLeast(0)
+  var editingStickerFileName by rememberSaveable { mutableStateOf<String?>(null) }
+  val editingSticker = editingStickerFileName?.let { fileName ->
+    editor.pack.stickers.firstOrNull { it.fileName == fileName }
+  }
 
   Scaffold(
     topBar = {
@@ -125,6 +146,7 @@ fun PackEditorScreen(
     ) {
       ReadinessStatusCard(
         editor = editor,
+        onChangeTrayIconClick = onChangeTrayIconClick,
         modifier = Modifier
           .fillMaxWidth()
           .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -155,7 +177,8 @@ fun PackEditorScreen(
             StickerGridTile(
               item = item,
               file = editor.stickerFiles[item.fileName],
-              canRemove = !editor.isImporting,
+              canEdit = !editor.isImporting,
+              onEdit = { editingStickerFileName = item.fileName },
               onRemove = { onRemoveSticker(item.fileName) },
             )
           }
@@ -163,11 +186,27 @@ fun PackEditorScreen(
       }
     }
   }
+
+  if (editingSticker != null) {
+    EditStickerDialog(
+      item = editingSticker,
+      onDismiss = { editingStickerFileName = null },
+      onSaveEmojis = { rawEmojis ->
+        onUpdateStickerEmojis(editingSticker.fileName, rawEmojis)
+        editingStickerFileName = null
+      },
+      onSetAsTrayIcon = {
+        onSetStickerAsTrayIcon(editingSticker.fileName)
+        editingStickerFileName = null
+      },
+    )
+  }
 }
 
 @Composable
 private fun ReadinessStatusCard(
   editor: PackEditorState,
+  onChangeTrayIconClick: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val headline = when {
@@ -187,12 +226,14 @@ private fun ReadinessStatusCard(
         LocalImageThumbnail(
           file = editor.trayFile,
           contentDescription = "Tray icon",
+          cacheKey = editor.pack.imageDataVersion,
           modifier = Modifier
             .size(48.dp)
-            .clip(RoundedCornerShape(10.dp)),
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = !editor.isImporting, onClick = onChangeTrayIconClick),
         )
         Spacer(modifier = Modifier.width(12.dp))
-        Column {
+        Column(modifier = Modifier.weight(1f)) {
           Text(
             text = headline,
             style = MaterialTheme.typography.titleMedium,
@@ -202,6 +243,12 @@ private fun ReadinessStatusCard(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
+        }
+        TextButton(
+          onClick = onChangeTrayIconClick,
+          enabled = !editor.isImporting,
+        ) {
+          Text("Change tray")
         }
       }
 
@@ -232,7 +279,8 @@ private fun ReadinessStatusCard(
 private fun StickerGridTile(
   item: StickerItem,
   file: File?,
-  canRemove: Boolean,
+  canEdit: Boolean,
+  onEdit: () -> Unit,
   onRemove: () -> Unit,
 ) {
   val sizeKb = (item.sizeBytes + 1023) / 1024
@@ -255,7 +303,7 @@ private fun StickerGridTile(
         )
         IconButton(
           onClick = onRemove,
-          enabled = canRemove,
+          enabled = canEdit,
           modifier = Modifier
             .align(Alignment.TopEnd)
             .size(32.dp),
@@ -267,6 +315,18 @@ private fun StickerGridTile(
           )
         }
       }
+      AssistChip(
+        onClick = onEdit,
+        enabled = canEdit,
+        label = {
+          Text(
+            text = item.emojis.joinToString(" "),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        },
+        modifier = Modifier.padding(horizontal = 8.dp),
+      )
       Text(
         text = "$sizeKb KB",
         style = MaterialTheme.typography.labelSmall,
@@ -276,6 +336,108 @@ private fun StickerGridTile(
     }
   }
 }
+
+@Composable
+private fun EditStickerDialog(
+  item: StickerItem,
+  onDismiss: () -> Unit,
+  onSaveEmojis: (rawEmojis: String) -> Unit,
+  onSetAsTrayIcon: () -> Unit,
+) {
+  var rawInput by rememberSaveable(item.fileName) {
+    mutableStateOf(item.emojis.joinToString(" "))
+  }
+  val parseResult = parseStickerEmojis(rawInput)
+  val selectedEmojis = (parseResult as? EmojiParseResult.Valid)?.emojis.orEmpty()
+
+  val supportingMessage = when (parseResult) {
+    is EmojiParseResult.Valid -> "${parseResult.emojis.size}/${WhatsAppLimits.MAX_EMOJIS} emojis"
+    is EmojiParseResult.Invalid -> when (val error = parseResult.error) {
+      EmojiValidationError.Empty -> "Enter at least ${WhatsAppLimits.MIN_EMOJIS} emoji"
+      is EmojiValidationError.TooMany -> "Use at most ${error.max} emojis (${error.count} entered)"
+      EmojiValidationError.NonEmojiInput -> "Enter emojis only"
+    }
+  }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text("Edit Sticker") },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedTextField(
+          value = rawInput,
+          onValueChange = { rawInput = it },
+          label = { Text("Emojis (1–3)") },
+          singleLine = true,
+          isError = parseResult is EmojiParseResult.Invalid,
+          supportingText = { Text(supportingMessage) },
+          modifier = Modifier.fillMaxWidth(),
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          for (row in QUICK_PICK_EMOJIS.chunked(4)) {
+            Row(
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+              modifier = Modifier.fillMaxWidth(),
+            ) {
+              for (emoji in row) {
+                val isSelected = emoji in selectedEmojis
+                FilterChip(
+                  selected = isSelected,
+                  onClick = {
+                    val updated = when (parseResult) {
+                      is EmojiParseResult.Valid -> {
+                        if (isSelected) {
+                          parseResult.emojis.filterNot { it == emoji }
+                        } else if (parseResult.emojis.size < WhatsAppLimits.MAX_EMOJIS) {
+                          parseResult.emojis + emoji
+                        } else {
+                          parseResult.emojis
+                        }
+                      }
+                      is EmojiParseResult.Invalid -> {
+                        if (parseResult.error == EmojiValidationError.Empty) {
+                          listOf(emoji)
+                        } else {
+                          null
+                        }
+                      }
+                    }
+                    if (updated != null) {
+                      rawInput = updated.joinToString(" ")
+                    }
+                  },
+                  label = { Text(emoji) },
+                  modifier = Modifier.weight(1f),
+                )
+              }
+            }
+          }
+        }
+        OutlinedButton(
+          onClick = onSetAsTrayIcon,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Text("Use as tray icon")
+        }
+      }
+    },
+    confirmButton = {
+      Button(
+        onClick = { onSaveEmojis(rawInput) },
+        enabled = parseResult is EmojiParseResult.Valid,
+      ) {
+        Text("Save")
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss) {
+        Text("Cancel")
+      }
+    },
+  )
+}
+
+private val QUICK_PICK_EMOJIS = listOf("🙂", "😂", "🔥", "❤️", "👍", "🎉", "😍", "😎")
 
 private fun formatValidationIssue(issue: PackValidationIssue): String = when (issue) {
   PackValidationIssue.BlankName -> "Pack name is required"
@@ -290,5 +452,8 @@ private fun formatValidationIssue(issue: PackValidationIssue): String = when (is
   is PackValidationIssue.TooManyStickers -> "Remove ${issue.current - issue.max} stickers (max ${issue.max})"
   is PackValidationIssue.StickerExceedsMaxSize -> {
     "${issue.fileName} exceeds 100 KB (${(issue.sizeBytes + 1023) / 1024} KB)"
+  }
+  is PackValidationIssue.InvalidStickerEmojis -> {
+    "${issue.fileName} must have ${WhatsAppLimits.MIN_EMOJIS}–${WhatsAppLimits.MAX_EMOJIS} emojis (found ${issue.count})"
   }
 }

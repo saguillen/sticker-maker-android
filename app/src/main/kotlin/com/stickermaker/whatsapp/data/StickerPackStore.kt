@@ -124,6 +124,49 @@ class FileStickerPackStore(
     updated
   }
 
+  fun updateTrayIcon(id: PackId, trayPngBytes: ByteArray): StickerPack = synchronized(lock) {
+    require(trayPngBytes.isNotEmpty()) { "Tray icon must not be empty" }
+    require(trayPngBytes.size <= WhatsAppLimits.MAX_TRAY_ICON_BYTES) {
+      "Tray icon exceeds ${WhatsAppLimits.MAX_TRAY_ICON_BYTES} bytes"
+    }
+
+    val existing = readPackLocked(id)
+      ?: throw NoSuchElementException("Sticker pack not found: ${id.value}")
+    val dir = packDir(id)
+    val trayFileName = StickerFileName(existing.trayImageFile)
+    writeBytesAtomically(File(dir, trayFileName.value), trayPngBytes)
+
+    val updated = existing.copy(imageDataVersion = existing.imageDataVersion + 1)
+    writeManifestAtomically(dir, updated)
+    updated
+  }
+
+  fun updateStickerEmojis(
+    id: PackId,
+    fileName: StickerFileName,
+    emojis: List<String>,
+  ): StickerPack = synchronized(lock) {
+    require(emojis.size in WhatsAppLimits.MIN_EMOJIS..WhatsAppLimits.MAX_EMOJIS) {
+      "Sticker must have between ${WhatsAppLimits.MIN_EMOJIS} and ${WhatsAppLimits.MAX_EMOJIS} emojis"
+    }
+    require(emojis.all { it.isNotBlank() }) { "Sticker emojis must not be blank" }
+
+    val existing = readPackLocked(id)
+      ?: throw NoSuchElementException("Sticker pack not found: ${id.value}")
+    if (existing.stickers.none { it.fileName == fileName.value }) {
+      throw NoSuchElementException("Sticker not found: ${fileName.value}")
+    }
+
+    val updated = existing.copy(
+      imageDataVersion = existing.imageDataVersion + 1,
+      stickers = existing.stickers.map { item ->
+        if (item.fileName == fileName.value) item.copy(emojis = emojis) else item
+      },
+    )
+    writeManifestAtomically(packDir(id), updated)
+    updated
+  }
+
   fun deletePack(id: PackId) = synchronized(lock) {
     val dir = packDir(id)
     if (dir.exists()) {

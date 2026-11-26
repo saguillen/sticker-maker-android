@@ -24,11 +24,13 @@ fun LocalImageThumbnail(
   file: File?,
   contentDescription: String?,
   modifier: Modifier = Modifier,
+  cacheKey: Any = Unit,
 ) {
   val bitmap by produceState<ImageBitmap?>(
     initialValue = null,
     key1 = file?.absolutePath,
     key2 = file?.lastModified(),
+    key3 = cacheKey,
   ) {
     value = if (file != null && file.isFile) {
       withContext(Dispatchers.IO) {
